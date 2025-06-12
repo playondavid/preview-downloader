@@ -1,9 +1,5 @@
 {
   "name": "hls-video-downloader",
   "version": "1.0.0",
-  "description": "HLS Video Segment Downloader",
-  "dependencies": {},
-  "scripts": {
-    "build": "echo 'No build step required'"
-  }
+  "description": "HLS Video Command Generator"
 }
