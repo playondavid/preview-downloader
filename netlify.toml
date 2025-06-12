@@ -1,0 +1,10 @@
+[build]
+  command = "echo 'Building...'"
+  functions = "netlify/functions"
+  publish = "."
+
+[functions]
+  node_bundler = "esbuild"
+
+[[plugins]]
+  package = "netlify-plugin-ffmpeg"
