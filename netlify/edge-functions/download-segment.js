@@ -1,29 +1,50 @@
 export default async (request, context) => {
+  // Add CORS headers for all responses
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  };
+
+  // Handle preflight requests
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
   if (request.method !== 'POST') {
-    return new Response('Method not allowed', { status: 405 });
+    return new Response('Method not allowed', { 
+      status: 405, 
+      headers: corsHeaders 
+    });
   }
 
   try {
     const { url, start, end, filename } = await request.json();
     
-    if (!url || !start || !end || !filename) {
-      return new Response('Missing required parameters', { status: 400 });
+    if (!url || start === undefined || end === undefined || !filename) {
+      return new Response(JSON.stringify({ error: 'Missing required parameters' }), { 
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
-    const duration = end - start;
+    console.log(`Processing segment: ${start}s to ${end}s from ${url}`);
+
+    // Fetch the M3U8 playlist
+    const playlistResponse = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; HLS-Downloader/1.0)'
+      }
+    });
     
-    // Use a streaming approach to download the HLS segment
-    const segmentUrl = `${url}?start=${start}&duration=${duration}`;
-    
-    // Fetch the M3U8 playlist first
-    const playlistResponse = await fetch(url);
     if (!playlistResponse.ok) {
-      throw new Error('Failed to fetch playlist');
+      throw new Error(`Failed to fetch playlist: ${playlistResponse.status}`);
     }
     
     const playlistText = await playlistResponse.text();
+    console.log('Playlist fetched successfully');
     
-    // Parse the playlist to find the segment URLs we need
+    // Parse the playlist to find segments
     const lines = playlistText.split('\n');
     const segments = [];
     let segmentDuration = 0;
@@ -35,43 +56,57 @@ export default async (request, context) => {
       if (line.startsWith('#EXTINF:')) {
         segmentDuration = parseFloat(line.split(':')[1].split(',')[0]);
       } else if (line && !line.startsWith('#')) {
-        // This is a segment URL
         const segmentStart = currentTime;
         const segmentEnd = currentTime + segmentDuration;
         
-        // Check if this segment overlaps with our desired time range
+        // Check if this segment is in our time range
         if (segmentEnd > start && segmentStart < end) {
           const segmentUrl = line.startsWith('http') ? line : new URL(line, url).href;
           segments.push({
             url: segmentUrl,
             start: segmentStart,
-            end: segmentEnd,
-            duration: segmentDuration
+            end: segmentEnd
           });
         }
         
         currentTime += segmentDuration;
-        
-        // Stop if we've passed our end time
-        if (currentTime > end) break;
+        if (currentTime > end + 10) break; // Add buffer
       }
     }
+    
+    console.log(`Found ${segments.length} segments to download`);
     
     if (segments.length === 0) {
       throw new Error('No segments found for the specified time range');
     }
     
-    // Download and concatenate the segments
+    // Download segments
     const segmentBuffers = [];
-    for (const segment of segments) {
-      const segmentResponse = await fetch(segment.url);
-      if (segmentResponse.ok) {
-        const buffer = await segmentResponse.arrayBuffer();
-        segmentBuffers.push(new Uint8Array(buffer));
+    for (let i = 0; i < segments.length; i++) {
+      try {
+        console.log(`Downloading segment ${i + 1}/${segments.length}`);
+        const segmentResponse = await fetch(segments[i].url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; HLS-Downloader/1.0)'
+          }
+        });
+        
+        if (segmentResponse.ok) {
+          const buffer = await segmentResponse.arrayBuffer();
+          segmentBuffers.push(new Uint8Array(buffer));
+        } else {
+          console.warn(`Failed to download segment ${i + 1}: ${segmentResponse.status}`);
+        }
+      } catch (error) {
+        console.warn(`Error downloading segment ${i + 1}:`, error);
       }
     }
     
-    // Concatenate all segment buffers
+    if (segmentBuffers.length === 0) {
+      throw new Error('Failed to download any segments');
+    }
+    
+    // Concatenate buffers
     const totalLength = segmentBuffers.reduce((sum, buffer) => sum + buffer.length, 0);
     const result = new Uint8Array(totalLength);
     let offset = 0;
@@ -81,23 +116,25 @@ export default async (request, context) => {
       offset += buffer.length;
     }
     
-    // Return the concatenated video
+    console.log(`Successfully processed ${segmentBuffers.length} segments, total size: ${totalLength} bytes`);
+    
     return new Response(result, {
       headers: {
-        'Content-Type': 'video/mp2t', // Transport Stream format
+        ...corsHeaders,
+        'Content-Type': 'video/mp2t',
         'Content-Disposition': `attachment; filename="${filename.replace('.mp4', '.ts')}"`,
         'Content-Length': result.length.toString(),
       },
     });
     
   } catch (error) {
-    console.error('Download error:', error);
+    console.error('Processing error:', error);
     return new Response(JSON.stringify({ 
       error: 'Processing failed', 
       details: error.message 
     }), { 
       status: 500,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
 };
